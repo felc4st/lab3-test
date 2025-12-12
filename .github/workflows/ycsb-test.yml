@@ -64,7 +64,7 @@ jobs:
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
         
         # Копіюємо драйвер
-        cp ../ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
         echo ">>> 3. Generating POM.xml <<<"
         cat <<EOF > labdb/pom.xml
