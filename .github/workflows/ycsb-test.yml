@@ -54,18 +54,19 @@ jobs:
     # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
     - name: Prepare and Run YCSB
       run: |
-        echo ">>> 1. Cloning YCSB <<<"
-        git clone https://github.com/brianfrankcooper/YCSB.git
+        echo ">>> 1. Cloning YCSB (Stable Version 0.17.0) <<<"
+        # FIX: Використовуємо конкретну версію, де пакети ще називаються com.yahoo.ycsb
+        git clone --branch 0.17.0 https://github.com/brianfrankcooper/YCSB.git --depth 1
         cd YCSB
         
         echo ">>> 2. Creating Module Structure <<<"
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
         
-        # Копіюємо драйвер (припускаємо, що він лежить в ycsb-driver/LabDBClient.java)
+        # Копіюємо драйвер
         cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
-        echo ">>> 3. Generating POM.xml (FIXED) <<<"
-        # FIX: Додано <relativePath>../pom.xml</relativePath>
+        echo ">>> 3. Generating POM.xml <<<"
+        # FIX: Вказуємо версію 0.17.0 і parent relativePath
         cat <<EOF > labdb/pom.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -75,7 +76,7 @@ jobs:
             <parent>
                 <groupId>com.yahoo.ycsb</groupId>
                 <artifactId>root</artifactId>
-                <version>0.18.0-SNAPSHOT</version>
+                <version>0.17.0</version>
                 <relativePath>../pom.xml</relativePath>
             </parent>
             <artifactId>labdb-binding</artifactId>
@@ -84,7 +85,7 @@ jobs:
                 <dependency>
                     <groupId>com.yahoo.ycsb</groupId>
                     <artifactId>core</artifactId>
-                    <version>\${project.version}</version>
+                    <version>0.17.0</version>
                 </dependency>
             </dependencies>
         </project>
@@ -94,8 +95,8 @@ jobs:
         sed -i '/<modules>/a <module>labdb</module>' pom.xml
         
         echo ">>> 5. Building <<<"
-        # -fn (fail-never) дозволяє продовжити навіть якщо в інших модулях YCSB є ворнінги
-        mvn -pl labdb -am clean package -DskipTests
+        # -fn ігнорує помилки в інших модулях YCSB (там бувають проблеми з javadoc), головне щоб наш зібрався
+        mvn -pl labdb -am clean package -DskipTests -fn
         
         echo ">>> 6. Running Benchmark <<<"
         # LOAD
