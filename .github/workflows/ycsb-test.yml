@@ -51,20 +51,22 @@ jobs:
 
 
 
-   # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
+    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
     - name: Prepare and Run YCSB
       run: |
         echo ">>> 1. Cloning YCSB (Stable Version 0.17.0) <<<"
         git clone --branch 0.17.0 https://github.com/brianfrankcooper/YCSB.git --depth 1
         cd YCSB
         
-        echo ">>> 2. Installing ROOT POM locally <<<"
-        # Спочатку встановлюємо кореневий проєкт, щоб Maven знав про нього
-        mvn clean install -DskipTests -am
+        echo ">>> 2. Installing CORE ONLY (Skipping broken modules) <<<"
+        # FIX: Використовуємо -pl core -am
+        # Це означає: "Збери тільки модуль 'core' і його батьків ('root')"
+        # Це дозволяє уникнути збірки Cassandra, яка викликає помилку
+        mvn -pl core -am clean install -DskipTests -Dmaven.javadoc.skip=true
         
         echo ">>> 3. Creating Module Structure <<<"
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
-        cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        cp ../ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
         echo ">>> 4. Generating POM.xml <<<"
         cat <<EOF > labdb/pom.xml
@@ -90,34 +92,33 @@ jobs:
         </project>
         EOF
         
-        echo ">>> 5. Registering & Building Module <<<"
-        # Додаємо модуль
+        echo ">>> 5. Registering & Building LabDB <<<"
+        # Додаємо наш модуль у root pom
         sed -i '/<modules>/a <module>labdb</module>' pom.xml
-        # Тепер збираємо, і оскільки ми зробили 'mvn install' на кроці 2, 
-        # Maven знайде parent pom у локальному репозиторії (~/.m2)
-        mvn -pl labdb -am package -DskipTests
         
-        echo ">>> 6. Running Benchmark (JAVA DIRECTLY) <<<"
-        # Замість глючного python скрипта, запускаємо Java напряму
-        # Нам треба зібрати CLASSPATH з усіх JAR файлів
+        # Будуємо тільки наш модуль. Оскільки 'core' ми встановили на кроці 2, все пройде гладко.
+        # Також копіюємо залежності в окрему папку, щоб зручно було запускати
+        mvn -pl labdb package -DskipTests dependency:copy-dependencies
         
-        # 1. Core YCSB jars
-        CP="core/target/*:core/target/dependency/*"
-        # 2. Наш LabDB jar
-        CP="$CP:labdb/target/*:labdb/target/dependency/*"
-        # 3. Slf4j (логінг)
-        CP="$CP:core/target/dependency/slf4j-api-*.jar:core/target/dependency/slf4j-simple-*.jar"
-
+        echo ">>> 6. Preparing Classpath <<<"
+        # Нам потрібно зібрати всі JAR файли для запуску Java
+        # 1. JAR нашого драйвера
+        CP="labdb/target/labdb-binding-0.17.0.jar"
+        # 2. Залежності драйвера (там лежить core-0.17.0.jar і решта)
+        CP="$CP:labdb/target/dependency/*"
+        
         echo "Classpath: $CP"
 
-        echo ">>> LOAD PHASE <<<"
+        echo ">>> 7. Running Benchmark (JAVA DIRECTLY) <<<"
+        
+        echo "--- LOAD PHASE ---"
         java -cp "$CP" com.yahoo.ycsb.Client -load -db com.yahoo.ycsb.db.LabDBClient \
           -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p recordcount=500 \
           -p threadcount=2
 
-        echo ">>> RUN PHASE <<<"
+        echo "--- RUN PHASE ---"
         java -cp "$CP" com.yahoo.ycsb.Client -t -db com.yahoo.ycsb.db.LabDBClient \
           -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
