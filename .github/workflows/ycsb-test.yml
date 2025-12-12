@@ -51,24 +51,25 @@ jobs:
 
 
 
-    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
+    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB (FIXED NAMESPACE)
     - name: Prepare and Run YCSB
       run: |
         echo ">>> 1. Cloning YCSB (Stable Version 0.17.0) <<<"
         git clone --branch 0.17.0 https://github.com/brianfrankcooper/YCSB.git --depth 1
         cd YCSB
         
-        echo ">>> 2. Installing CORE ONLY (Skipping broken modules) <<<"
-        # FIX: Використовуємо -pl core -am
-        # Це означає: "Збери тільки модуль 'core' і його батьків ('root')"
-        # Це дозволяє уникнути збірки Cassandra, яка викликає помилку
+        echo ">>> 2. Installing CORE ONLY <<<"
         mvn -pl core -am clean install -DskipTests -Dmaven.javadoc.skip=true
         
-        echo ">>> 3. Creating Module Structure <<<"
-        mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
-        cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        echo ">>> 3. Creating Module Structure (site.ycsb) <<<"
+        # У версії 0.17.0 пакети називаються site.ycsb, тому створюємо відповідну папку
+        mkdir -p labdb/src/main/java/site/ycsb/db
         
-        echo ">>> 4. Generating POM.xml <<<"
+        # МАГІЯ: Копіюємо ваш файл, але на льоту замінюємо 'com.yahoo.ycsb' на 'site.ycsb'
+        # Це виправить і package, і imports, щоб вони збігалися з новим ядром
+        sed 's/com.yahoo.ycsb/site.ycsb/g' ../tests/ycsb-driver/LabDBClient.java > labdb/src/main/java/site/ycsb/db/LabDBClient.java
+        
+        echo ">>> 4. Generating POM.xml (site.ycsb) <<<"
         cat <<EOF > labdb/pom.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -76,7 +77,7 @@ jobs:
                  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
             <modelVersion>4.0.0</modelVersion>
             <parent>
-                <groupId>com.yahoo.ycsb</groupId>
+                <groupId>site.ycsb</groupId>
                 <artifactId>root</artifactId>
                 <version>0.17.0</version>
             </parent>
@@ -84,7 +85,7 @@ jobs:
             <name>LabDB Binding</name>
             <dependencies>
                 <dependency>
-                    <groupId>com.yahoo.ycsb</groupId>
+                    <groupId>site.ycsb</groupId>
                     <artifactId>core</artifactId>
                     <version>0.17.0</version>
                 </dependency>
@@ -93,37 +94,35 @@ jobs:
         EOF
         
         echo ">>> 5. Registering & Building LabDB <<<"
-        # Додаємо наш модуль у root pom
         sed -i '/<modules>/a <module>labdb</module>' pom.xml
         
-        # Будуємо тільки наш модуль. Оскільки 'core' ми встановили на кроці 2, все пройде гладко.
-        # Також копіюємо залежності в окрему папку, щоб зручно було запускати
+        # Збираємо модуль і копіюємо залежності в папку target/dependency
         mvn -pl labdb package -DskipTests dependency:copy-dependencies
         
         echo ">>> 6. Preparing Classpath <<<"
-        # Нам потрібно зібрати всі JAR файли для запуску Java
-        # 1. JAR нашого драйвера
-        CP="labdb/target/labdb-binding-0.17.0.jar"
-        # 2. Залежності драйвера (там лежить core-0.17.0.jar і решта)
-        CP="$CP:labdb/target/dependency/*"
+        # Збираємо шляхи до всіх JAR файлів
+        CP="labdb/target/labdb-binding-0.17.0.jar:labdb/target/dependency/*"
         
         echo "Classpath: $CP"
 
         echo ">>> 7. Running Benchmark (JAVA DIRECTLY) <<<"
         
+        # Увага: Тут ми викликаємо site.ycsb.Client (нова назва класу)
+        
         echo "--- LOAD PHASE ---"
-        java -cp "$CP" com.yahoo.ycsb.Client -load -db com.yahoo.ycsb.db.LabDBClient \
+        java -cp "$CP" site.ycsb.Client -load -db site.ycsb.db.LabDBClient \
           -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p recordcount=500 \
           -p threadcount=2
 
         echo "--- RUN PHASE ---"
-        java -cp "$CP" com.yahoo.ycsb.Client -t -db com.yahoo.ycsb.db.LabDBClient \
+        java -cp "$CP" site.ycsb.Client -t -db site.ycsb.db.LabDBClient \
           -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p operationcount=1000 \
           -p threadcount=4
+          
     # 8. ДЕБАГ (Виправлені імена контейнерів)
     - name: Show Docker Logs (Debug)
       if: always()
