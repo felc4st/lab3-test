@@ -1,149 +1,177 @@
 import os
 import requests
 import logging
+import random
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
 from uhashring import HashRing
-from typing import Optional, Dict
-from urllib.parse import quote
+from typing import Optional, Dict, List
 
-# --- CONFIG ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Coordinator")
 
-app = FastAPI(
-    title="Coordinator Service",
-    description="Lab 2: Sharding, Consistent Hashing, Service Discovery",
-    version="2.0.0"
-)
+app = FastAPI(title="Coordinator V3 (Replication & Durability)")
 
-# 1. Стан системи
-# Початкові шарди можна задати через ENV, але нові додаються через API
-initial_shards = os.getenv("SHARD_NODES", "").split(",")
-initial_shards = [s for s in initial_shards if s]  # Чистимо пусті
+# --- STATE ---
+# Map: ShardID -> { "leader": url, "followers": [url, url] }
+SHARD_TOPOLOGY = {}
+# Consistent Hashing (keys -> ShardID)
+ring = HashRing(nodes=[]) 
 
-# Consistent Hashing Ring (Task 3a)
-ring = HashRing(nodes=initial_shards)
-
-# Реєстр таблиць (Task 1a)
-# Format: {"table_name": {"pk": "partition_key_name"}}
-TABLE_SCHEMAS: Dict[str, dict] = {}
-
+TABLE_SCHEMAS = {}
 
 # --- MODELS ---
+class ShardRegister(BaseModel):
+    shard_id: str   # "shard-1"
+    url: str        # "http://10.0.1.5:8000"
+    role: str       # "leader" or "follower"
+
 class TableDefinition(BaseModel):
     name: str
-
-class ShardRegister(BaseModel):
-    url: str
 
 class RecordPayload(BaseModel):
     partition_key: str
     sort_key: Optional[str] = None
     value: dict
 
-
-# --- HELPER FUNCTIONS ---
-def _get_routing_info(partition_key: str, sort_key: Optional[str] = None):
-    """
-    Визначає, на який шард йти (Task 3a) і як формувати ключ зберігання (Task 1c).
-    """
-    # 1. Routing: Використовуємо ТІЛЬКИ Partition Key для вибору шарда
-    target_node = ring.get_node(partition_key)
+# --- HELPERS ---
+def _get_topology(partition_key: str):
+    """Returns (ShardID, LeaderURL, AllReplicaURLs, RealStorageKey)"""
+    shard_id = ring.get_node(partition_key)
+    if not shard_id or shard_id not in SHARD_TOPOLOGY:
+        raise HTTPException(503, "No shards available")
     
-    if not target_node:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No shards available in the ring")
+    group = SHARD_TOPOLOGY[shard_id]
+    leader = group["leader"]
+    replicas = [leader] + group["followers"]
+    # Filter out Nones
+    replicas = [r for r in replicas if r]
 
-    # 2. Storage Key: Формуємо Compound Key (Partition + Sort)
-    if sort_key:
-        real_key = f"{partition_key}#{sort_key}"
-    else:
-        real_key = partition_key
-        
-    return target_node, real_key
+    return shard_id, leader, replicas
 
+def _get_storage_key(partition_key: str, sort_key: str = None):
+    return f"{partition_key}#{sort_key}" if sort_key else partition_key
 
-# --- API: INFRASTRUCTURE (Task 3a - Dynamic Updates) ---
-@app.post("/shards/register", tags=["Infrastructure"], summary="Register new shard")
+# --- API: INFRASTRUCTURE ---
+@app.post("/shards/register")
 def register_shard(shard: ShardRegister):
-    """
-    Виконується шардом при старті. Додає ноду в кільце хешування.
-    """
-    if shard.url in ring.get_nodes():
-        return {"message": "Shard already registered", "total_nodes": len(ring.get_nodes())}
+    # 1. Add ShardID to ring if new
+    if shard.shard_id not in SHARD_TOPOLOGY:
+        SHARD_TOPOLOGY[shard.shard_id] = {"leader": None, "followers": []}
+        ring.add_node(shard.shard_id)
     
-    ring.add_node(shard.url)
-    logger.info(f"Registered new shard: {shard.url}")
-    return {"message": "Shard registered", "total_nodes": len(ring.get_nodes())}
+    # 2. Update Topology
+    if shard.role == "leader":
+        SHARD_TOPOLOGY[shard.shard_id]["leader"] = shard.url
+    else:
+        if shard.url not in SHARD_TOPOLOGY[shard.shard_id]["followers"]:
+            SHARD_TOPOLOGY[shard.shard_id]["followers"].append(shard.url)
+            
+    logger.info(f"Registered {shard.role} for {shard.shard_id}: {shard.url}")
+    return {"status": "registered", "topology": SHARD_TOPOLOGY}
 
-
-# --- API: SCHEMA (Task 1a) ---
-@app.post("/tables", tags=["Schema"], status_code=status.HTTP_201_CREATED)
+@app.post("/tables")
 def create_table(table: TableDefinition):
-    if table.name in TABLE_SCHEMAS:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Table already exists")
-    
     TABLE_SCHEMAS[table.name] = table.dict()
-    logger.info(f"Created table: {table.name}")
-    return {"status": "created", "table": table.name}
+    return {"status": "created"}
 
+# --- API: CRUD OPERATIONS ---
 
-# --- API: DATA (Task 2 & 3b) ---
-
-# CREATE / UPDATE
-@app.post("/tables/{table_name}/records", tags=["Data"])
+# 1. CREATE / UPDATE -> Send to LEADER
+@app.post("/tables/{table_name}/records")
 def write_record(table_name: str, record: RecordPayload):
-    if table_name not in TABLE_SCHEMAS:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Table not found")
-
-    node_url, real_key = _get_routing_info(record.partition_key, record.sort_key)
+    if table_name not in TABLE_SCHEMAS: raise HTTPException(404, "Table unknown")
+    
+    shard_id, leader, _ = _get_topology(record.partition_key)
+    if not leader: raise HTTPException(503, f"Shard {shard_id} has no leader")
+    
+    real_key = _get_storage_key(record.partition_key, record.sort_key)
     
     try:
-        # Проксуємо запит на шард
-        safe_key = quote(real_key, safe="")
-        resp = requests.post(f"{node_url}/storage/{safe_key}", json=record.value)
+        # WRITE goes to Leader
+        resp = requests.post(f"{leader}/storage/{real_key}", json={"value": record.value})
         return resp.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to contact shard {node_url}: {e}")
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Shard is unreachable")
+    except Exception as e:
+        raise HTTPException(502, f"Leader write failed: {e}")
 
-# READ
-@app.get("/tables/{table_name}/records/{partition_key}", tags=["Data"])
-def read_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
-    node_url, real_key = _get_routing_info(partition_key, sort_key)
-    
-    try:
-        safe_key = quote(real_key, safe="")
-        resp = requests.get(f"{node_url}/storage/{safe_key}")
-        if resp.status_code == 404:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Key not found")
-        return resp.json()
-    except requests.exceptions.RequestException:
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Shard is unreachable")
-
-# EXISTS (HEAD)
-@app.head("/tables/{table_name}/records/{partition_key}", tags=["Data"])
-def check_exists(table_name: str, partition_key: str, sort_key: Optional[str] = None):
-    node_url, real_key = _get_routing_info(partition_key, sort_key)
-    try:
-        # Використовуємо HEAD для оптимізації (не качаємо тіло)
-        safe_key = quote(real_key, safe="")
-        resp = requests.head(f"{node_url}/storage/{safe_key}")
-        return Response(status_code=resp.status_code)
-    except:
-        return Response(status_code=status.HTTP_502_BAD_GATEWAY)
-
-# DELETE
-@app.delete("/tables/{table_name}/records/{partition_key}", tags=["Data"])
+# 2. DELETE -> Send to LEADER
+@app.delete("/tables/{table_name}/records/{partition_key}")
 def delete_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
-    node_url, real_key = _get_routing_info(partition_key, sort_key)
+    shard_id, leader, _ = _get_topology(partition_key)
+    if not leader: raise HTTPException(503, "No leader")
+    
+    real_key = _get_storage_key(partition_key, sort_key)
+    
     try:
-        safe_key = quote(real_key, safe="")
-        requests.delete(f"{node_url}/storage/{safe_key}")
+        # DELETE goes to Leader
+        requests.delete(f"{leader}/storage/{real_key}")
         return {"status": "deleted"}
     except:
+        raise HTTPException(502, "Leader delete failed")
 
-        raise HTTPException(status.HTTP_502_BAD_GATEWAY, "Shard is unreachable")
+# 3. READ -> Load Balance (Random Replica)
+@app.get("/tables/{table_name}/records/{partition_key}")
+def read_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
+    _, _, replicas = _get_topology(partition_key)
+    real_key = _get_storage_key(partition_key, sort_key)
+    
+    # Load Balancing: Pick random replica
+    target = random.choice(replicas)
+    
+    try:
+        # Expecting { "value": ..., "version": ... }
+        resp = requests.get(f"{target}/storage/{real_key}")
+        if resp.status_code == 404:
+             raise HTTPException(404, "Not found")
+        return resp.json()
+    except:
+        raise HTTPException(502, "Replica read failed")
 
+# 4. EXISTS (HEAD) -> Load Balance
+@app.head("/tables/{table_name}/records/{partition_key}")
+def check_exists(table_name: str, partition_key: str, sort_key: Optional[str] = None):
+    _, _, replicas = _get_topology(partition_key)
+    real_key = _get_storage_key(partition_key, sort_key)
+    target = random.choice(replicas)
+    
+    try:
+        resp = requests.head(f"{target}/storage/{real_key}")
+        return Response(status_code=resp.status_code)
+    except:
+        return Response(status_code=502)
+
+# 5. QUORUM READ (Task 4)
+@app.get("/tables/{table_name}/records/{partition_key}/quorum")
+def read_quorum(table_name: str, partition_key: str, sort_key: Optional[str] = None, R: int = 2):
+    """Читає R реплік і повертає найсвіжішу версію"""
+    _, _, replicas = _get_topology(partition_key)
+    real_key = _get_storage_key(partition_key, sort_key)
+    
+    if len(replicas) < R:
+        raise HTTPException(400, f"Not enough replicas (Has {len(replicas)}, need {R})")
+    
+    # Query R random replicas
+    targets = random.sample(replicas, R)
+    results = []
+    
+    for node in targets:
+        try:
+            r = requests.get(f"{node}/storage/{real_key}", timeout=1)
+            if r.status_code == 200:
+                results.append(r.json()) # {value, version}
+        except:
+            pass
+            
+    if not results:
+        raise HTTPException(404, "Quorum failed: Key not found or nodes down")
+    
+    # Conflict Resolution: Last Write Wins (by Version)
+    best_record = max(results, key=lambda x: x["version"])
+    
+    return {
+        "value": best_record["value"],
+        "version": best_record["version"],
+        "quorum_met": True
+    }
 
 
