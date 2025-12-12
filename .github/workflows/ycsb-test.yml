@@ -66,7 +66,7 @@ jobs:
         
         echo ">>> 3. Creating Module Structure <<<"
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
-        cp ../ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
         echo ">>> 4. Generating POM.xml <<<"
         cat <<EOF > labdb/pom.xml
