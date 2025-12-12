@@ -11,9 +11,14 @@ from typing import Dict, Any, List, Optional
 
 # --- CONFIG ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(role)s] %(message)s')
+
+# Identity & Topology Config
 ROLE = os.getenv("ROLE", "leader") # 'leader' or 'follower'
+SHARD_ID = os.getenv("SHARD_ID", "unknown-shard") # <--- NEW: ID шарда (напр. shard-1)
 LEADER_URL = os.getenv("LEADER_URL", "")
+COORDINATOR_URL = os.getenv("COORDINATOR_URL", "http://coordinator:8000") # <--- NEW
 HOSTNAME = socket.gethostname()
+MY_ADDRESS = os.getenv("MY_ADDRESS", f"http://{HOSTNAME}:8000") # <--- NEW
 
 # Logger injects role for clarity
 logger = logging.getLogger("ShardNode")
@@ -115,7 +120,37 @@ class WALManager:
 
 wal = WALManager(WAL_FILE)
 
-# --- REPLICATION LOGIC ---
+# --- AUTO-REGISTRATION & REPLICATION ---
+
+def register_with_coordinator():
+    """ <--- NEW: Logic to register shard in Coordinator V3 """
+    if not COORDINATOR_URL or not MY_ADDRESS:
+        logger.warning("Skipping registration: COORDINATOR_URL or MY_ADDRESS not set")
+        return
+
+    endpoint = f"{COORDINATOR_URL}/shards/register"
+    # Payload must match what Coordinator V3 expects
+    payload = {
+        "shard_id": SHARD_ID,
+        "url": MY_ADDRESS,
+        "role": ROLE
+    }
+    
+    logger.info(f"Attempting to register at {endpoint} with {payload}...")
+
+    while True:
+        try:
+            resp = requests.post(endpoint, json=payload, timeout=5)
+            if resp.status_code == 200:
+                logger.info(f"✅ Registered successfully as {ROLE} for {SHARD_ID}!")
+                break
+            else:
+                logger.warning(f"Registration rejected: {resp.status_code} {resp.text}")
+        except Exception as e:
+            logger.warning(f"⏳ Coordinator unavailable ({e}). Retrying in 5s...")
+        
+        time.sleep(5)
+
 def replication_worker():
     while True:
         if ROLE == "follower" and LEADER_URL:
@@ -130,7 +165,12 @@ def replication_worker():
                 logger.error(f"Replication failed: {e}")
         time.sleep(1)
 
-threading.Thread(target=replication_worker, daemon=True).start()
+@app.on_event("startup")
+def startup_event():
+    # Start registration and replication in background threads
+    threading.Thread(target=register_with_coordinator, daemon=True).start()
+    threading.Thread(target=replication_worker, daemon=True).start()
+
 
 # --- API ---
 
@@ -178,4 +218,4 @@ def get_replication_log(start_offset: int = 0):
 
 @app.get("/health")
 def health():
-    return {"role": ROLE, "offset": wal.current_offset, "keys": len(DATA_STORE)}
+    return {"role": ROLE, "shard_id": SHARD_ID, "offset": wal.current_offset, "keys": len(DATA_STORE)}
