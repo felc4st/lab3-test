@@ -20,7 +20,7 @@ def wait_for_system():
             # Якщо шардів немає, повернеться 503
             resp = requests.post(
                 f"{BASE_URL}/tables/test_health_check/records", 
-                json={"partition_key": "health", "value": {"status": "ok"}}
+                json={"partition_key": "user_123", "value": {"status": "ok"}}
             )
             
             if resp.status_code == 200:
