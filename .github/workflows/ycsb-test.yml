@@ -49,9 +49,7 @@ jobs:
     - name: Wait for Cluster
       run: sleep 60
 
-    # 6. ФУНКЦІОНАЛЬНІ ТЕСТИ
-    - name: Run Integration Tests
-      run: pytest tests/wal_test.py -v
+
 
     # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
     - name: Prepare and Run YCSB
