@@ -1,3 +1,4 @@
+
 name: CI - Local Tests with Terraform
 
 on:
@@ -43,7 +44,7 @@ jobs:
 
     # 6. Запускаємо тести
     - name: Run Integration Tests
-      run: pytest tests/integration_test.py -v
+      run: pytest tests/wal_test.py -v
 
     # 7. Показуємо логи (якщо щось впало)
     - name: Show Docker Logs (Debug)
