@@ -47,7 +47,7 @@ jobs:
 
     # 5. Очікування (збільшено до 60с для надійності)
     - name: Wait for Cluster
-      run: sleep 60
+      run: sleep 120
 
 
 
