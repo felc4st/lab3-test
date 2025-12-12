@@ -102,14 +102,14 @@ jobs:
           -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p recordcount=500 \
-          -p threadcount=2
+          -p threadcount=1
 
         echo "--- RUN PHASE ---"
         java -cp "$CP" site.ycsb.Client -t -db site.ycsb.db.LabDBClient \
           -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p operationcount=1000 \
-          -p threadcount=4
+          -p threadcount=1
           
     # 8. ДЕБАГ (Виправлені імена контейнерів)
     - name: Show Docker Logs (Debug)
