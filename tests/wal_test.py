@@ -7,33 +7,38 @@ BASE_URL = "http://localhost:8000"
 
 def wait_for_system():
     """
-    Чекаємо не просто запуску координатора, а моменту, 
-    коли він знайде хоча б один шард.
+    Чекаємо повної готовності системи:
+    1. Шарди зареєструвалися.
+    2. Лідер приймає записи.
+    3. Репліки доступні для читання (DNS працює).
     """
-    print("Waiting for shards to register...")
-    for i in range(60): # Чекаємо до 60 секунд
+    print("Waiting for cluster to stabilize...")
+    for i in range(60):
         try:
-            # Спробуємо зареєструвати тестову таблицю (це завжди працює)
+            # 1. Реєструємо тестову таблицю
             requests.post(f"{BASE_URL}/tables", json={"name": "test_health_check"})
             
-            # Спробуємо записати дані, щоб перевірити, чи є активні шарди
-            # Якщо шардів немає, повернеться 503
-            resp = requests.post(
+            # 2. WRITE CHECK (Leader)
+            write_resp = requests.post(
                 f"{BASE_URL}/tables/test_health_check/records", 
-                json={"partition_key": "user_123", "value": {"status": "ok"}}
+                json={"partition_key": "health", "value": {"status": "ok"}}
             )
             
-            if resp.status_code == 200:
-                print(f"System ready! (Attempt {i})")
-                time.sleep(1)
+            # 3. READ CHECK (Random Replica) <-- НОВЕ!
+            # Ми пробуємо читати. Координатор перенаправить це на випадкову ноду.
+            # Якщо випаде фоловер, який ще не готовий, ми отримаємо 502 і підемо на retry.
+            read_resp = requests.get(f"{BASE_URL}/tables/test_health_check/records/health")
+            
+            if write_resp.status_code == 200 and read_resp.status_code == 200:
+                print(f"System fully ready! (Attempt {i})")
+                time.sleep(2) 
                 return
         except Exception as e:
             pass
         
         time.sleep(1)
     
-    pytest.fail("System did not become ready (Shards failed to register)")
-
+    pytest.fail("System did not become ready (Read/Write check failed)")
 def test_basic_crud():
     wait_for_system()
     
