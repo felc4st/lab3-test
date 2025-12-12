@@ -9,92 +9,124 @@ terraform {
 
 provider "docker" {}
 
-# 1. Збираємо Docker Image локально
+# 1. Створюємо мережу, щоб контейнери бачили один одного по імені
+resource "docker_network" "lab_net" {
+  name = "lab3-network"
+}
+
+# 2. Збираємо образ (один на всіх)
 resource "docker_image" "app_image" {
-  name = "lab2-app:local"
+  name = "lab3-app:local"
   build {
-    context = "../../app" # Шлях до папки з кодом відносно цього файлу
-    tag     = ["lab2-app:latest"]
+    context = "../../app" # Шлях до папки з кодом
+    tag     = ["lab3-app:latest"]
   }
 }
 
-# 2. Створюємо мережу, щоб контейнери бачили один одного
-resource "docker_network" "lab_network" {
-  name = "lab2-net"
-}
-
-# 3. Coordinator Container
+# 3. COORDINATOR
 resource "docker_container" "coordinator" {
   name  = "coordinator"
   image = docker_image.app_image.name
   restart = "always"
-
+  
   env = [
     "APP_FILE=coordinator.py",
-    "SHARD_NODES=" # Порожній, бо шарди реєструються самі
+    # Координатор спочатку пустий, шарди самі до нього постукають
+    "SHARD_NODES=" 
   ]
-
+  
   ports {
     internal = 8000
-    external = 8000 # Доступ з хоста по localhost:8000
+    external = 8000 # Доступний зовні як localhost:8000
   }
-
+  
   networks_advanced {
-    name = docker_network.lab_network.name
+    name = docker_network.lab_net.name
     aliases = ["coordinator"]
   }
 }
 
-# 4. Shard 1 Container
-resource "docker_container" "shard1" {
-  name  = "shard-1"
+# --- SHARD 1 GROUP (Replication Demo) ---
+
+# Shard 1 LEADER
+resource "docker_container" "s1_leader" {
+  name  = "s1-leader"
   image = docker_image.app_image.name
   restart = "always"
 
   env = [
     "APP_FILE=shard.py",
+    "ROLE=leader",
     "COORDINATOR_URL=http://coordinator:8000",
-    "MY_ADDRESS=http://shard-1:8000"
+    "MY_ADDRESS=http://s1-leader:8000"
   ]
 
-  ports {
-    internal = 8000
-    external = 8001
+  # Монтуємо папку для WAL логів (Durability)
+  # Використовуємо абсолютний шлях для локального запуску
+  volumes {
+    host_path      = "${abspath(path.cwd)}/data/s1-leader"
+    container_path = "/app/data"
   }
-
 
   networks_advanced {
-    name = docker_network.lab_network.name
-    aliases = ["shard-1"]
+    name = docker_network.lab_net.name
+    aliases = ["s1-leader"]
   }
   
-  # Чекаємо запуску координатора (хоча авто-реєстрація має retry logic)
   depends_on = [docker_container.coordinator]
 }
 
-# 5. Shard 2 Container
-resource "docker_container" "shard2" {
-  name  = "shard-2"
+# Shard 1 FOLLOWER
+resource "docker_container" "s1_follower" {
+  name  = "s1-follower"
   image = docker_image.app_image.name
   restart = "always"
 
   env = [
     "APP_FILE=shard.py",
+    "ROLE=follower",
     "COORDINATOR_URL=http://coordinator:8000",
-    "MY_ADDRESS=http://shard-2:8000"
+    "MY_ADDRESS=http://s1-follower:8000",
+    "LEADER_URL=http://s1-leader:8000" # Вказуємо на лідера
   ]
 
-  ports {
-    internal = 8000
-    external = 8002
+  volumes {
+    host_path      = "${abspath(path.cwd)}/data/s1-follower"
+    container_path = "/app/data"
   }
 
+  networks_advanced {
+    name = docker_network.lab_net.name
+    aliases = ["s1-follower"]
+  }
+
+  depends_on = [docker_container.s1_leader]
+}
+
+# --- SHARD 2 (Sharding Demo) ---
+
+# Shard 2 LEADER (Single node for simplicity)
+resource "docker_container" "s2_leader" {
+  name  = "s2-leader"
+  image = docker_image.app_image.name
+  restart = "always"
+
+  env = [
+    "APP_FILE=shard.py",
+    "ROLE=leader",
+    "COORDINATOR_URL=http://coordinator:8000",
+    "MY_ADDRESS=http://s2-leader:8000"
+  ]
+
+  volumes {
+    host_path      = "${abspath(path.cwd)}/data/s2-leader"
+    container_path = "/app/data"
+  }
 
   networks_advanced {
-    name = docker_network.lab_network.name
-    aliases = ["shard-2"]
+    name = docker_network.lab_net.name
+    aliases = ["s2-leader"]
   }
 
   depends_on = [docker_container.coordinator]
-
 }
