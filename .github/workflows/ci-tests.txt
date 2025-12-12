@@ -40,7 +40,7 @@ jobs:
 
     # 5. Чекаємо трохи, поки контейнери прокинуться і зареєструються
     - name: Wait for services
-      run: sleep 15
+      run: sleep 40
 
     # 6. Запускаємо тести
     - name: Run Integration Tests
