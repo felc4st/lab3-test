@@ -43,8 +43,9 @@ resource "docker_container" "coordinator" {
   }
 }
 
-# --- SHARD 1 GROUP ---
+# ================= SHARD 1 GROUP =================
 
+# 1. Leader (Унікальний)
 resource "docker_container" "s1_leader" {
   name  = "s1-leader"
   image = docker_image.app_image.name
@@ -54,7 +55,7 @@ resource "docker_container" "s1_leader" {
     "PYTHONUNBUFFERED=1",
     "APP_FILE=shard.py",
     "ROLE=leader",
-    "SHARD_ID=shard-1",    # <--- ВАЖЛИВО!
+    "SHARD_ID=shard-1",
     "COORDINATOR_URL=http://coordinator:8000",
     "MY_ADDRESS=http://s1-leader:8000"
   ]
@@ -72,8 +73,11 @@ resource "docker_container" "s1_leader" {
   depends_on = [docker_container.coordinator]
 }
 
-resource "docker_container" "s1_follower" {
-  name  = "s1-follower"
+# 2. Followers (Масштабуємо через count)
+resource "docker_container" "s1_followers" {
+  count = 2  # <--- Створюємо 2 репліки: s1-follower-1, s1-follower-2
+
+  name  = "s1-follower-${count.index + 1}"
   image = docker_image.app_image.name
   restart = "always"
 
@@ -81,27 +85,30 @@ resource "docker_container" "s1_follower" {
     "PYTHONUNBUFFERED=1",
     "APP_FILE=shard.py",
     "ROLE=follower",
-    "SHARD_ID=shard-1",    # <--- ВАЖЛИВО!
+    "SHARD_ID=shard-1",
     "COORDINATOR_URL=http://coordinator:8000",
-    "MY_ADDRESS=http://s1-follower:8000",
+    # Генеруємо унікальну адресу: http://s1-follower-1:8000
+    "MY_ADDRESS=http://s1-follower-${count.index + 1}:8000",
     "LEADER_URL=http://s1-leader:8000"
   ]
 
   volumes {
-    host_path      = "${abspath(path.cwd)}/data/s1-follower"
+    # Кожен отримує свою папку: data/s1-follower-1, data/s1-follower-2
+    host_path      = "${abspath(path.cwd)}/data/s1-follower-${count.index + 1}"
     container_path = "/app/data"
   }
 
   networks_advanced {
     name = docker_network.lab_net.name
-    aliases = ["s1-follower"]
+    aliases = ["s1-follower-${count.index + 1}"]
   }
 
   depends_on = [docker_container.s1_leader]
 }
 
-# --- SHARD 2 ---
+# ================= SHARD 2 GROUP =================
 
+# 1. Leader
 resource "docker_container" "s2_leader" {
   name  = "s2-leader"
   image = docker_image.app_image.name
@@ -111,7 +118,7 @@ resource "docker_container" "s2_leader" {
     "PYTHONUNBUFFERED=1",
     "APP_FILE=shard.py",
     "ROLE=leader",
-    "SHARD_ID=shard-2",    # <--- ВАЖЛИВО!
+    "SHARD_ID=shard-2",
     "COORDINATOR_URL=http://coordinator:8000",
     "MY_ADDRESS=http://s2-leader:8000"
   ]
@@ -128,3 +135,35 @@ resource "docker_container" "s2_leader" {
 
   depends_on = [docker_container.coordinator]
 }
+
+# 2. Followers (Масштабуємо через count)
+resource "docker_container" "s2_followers" {
+  count = 2  # <--- Створюємо 2 репліки: s2-follower-1, s2-follower-2
+
+  name  = "s2-follower-${count.index + 1}"
+  image = docker_image.app_image.name
+  restart = "always"
+
+  env = [
+    "PYTHONUNBUFFERED=1",
+    "APP_FILE=shard.py",
+    "ROLE=follower",
+    "SHARD_ID=shard-2",
+    "COORDINATOR_URL=http://coordinator:8000",
+    "MY_ADDRESS=http://s2-follower-${count.index + 1}:8000",
+    "LEADER_URL=http://s2-leader:8000"
+  ]
+
+  volumes {
+    host_path      = "${abspath(path.cwd)}/data/s2-follower-${count.index + 1}"
+    container_path = "/app/data"
+  }
+
+  networks_advanced {
+    name = docker_network.lab_net.name
+    aliases = ["s2-follower-${count.index + 1}"]
+  }
+
+  depends_on = [docker_container.s2_leader]
+}
+
