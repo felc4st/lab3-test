@@ -59,35 +59,57 @@ jobs:
         cd YCSB
         
         echo ">>> 2. Installing CORE ONLY <<<"
-        # Встановлюємо ядро в локальний репозиторій
-        mvn -pl core -am clean install -DskipTests -Dmaven.javadoc.skip=true -Dcheckstyle.skip
+        mvn -pl core -am clean install -DskipTests -Dmaven.javadoc.skip=true
         
         echo ">>> 3. Creating Module Structure (site.ycsb) <<<"
         mkdir -p labdb/src/main/java/site/ycsb/db
-        
-        # Копіюємо файл і змінюємо назву пакету на нову (site.ycsb)
         sed 's/com.yahoo.ycsb/site.ycsb/g' ../tests/ycsb-driver/LabDBClient.java > labdb/src/main/java/site/ycsb/db/LabDBClient.java
         
-        echo ">>> 4. Generating POM.xml <<<"
-        cat <<EOF > labdb/pom.xml
-        <?xml version="1.0" encoding="UTF-8"?>
-        <project xmlns="http://maven.apache.org/POM/4.0.0"
-                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
-            <modelVersion>4.0.0</modelVersion>
-            <parent>
-                <groupId>site.ycsb</groupId>
-                <artifactId>root</artifactId>
-                <version>0.17.0</version>
-            </parent>
-            <artifactId>labdb-binding</artifactId>
-            <name>LabDB Binding</name>
-            <dependencies>
-                <dependency>
-                    <groupId>site.ycsb</groupId>
-                    <artifactId>core</artifactId>
-                    <version>0.17.0</version>
-                </dependency>
+        echo ">>> 4. Generating POM.xml (SAFE MODE) <<<"
+        # Використовуємо echo замість cat <<EOF, щоб уникнути помилок відступів
+        echo '<?xml version="1.0" encoding="UTF-8"?>' > labdb/pom.xml
+        echo '<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">' >> labdb/pom.xml
+        echo '    <modelVersion>4.0.0</modelVersion>' >> labdb/pom.xml
+        echo '    <parent>' >> labdb/pom.xml
+        echo '        <groupId>site.ycsb</groupId>' >> labdb/pom.xml
+        echo '        <artifactId>root</artifactId>' >> labdb/pom.xml
+        echo '        <version>0.17.0</version>' >> labdb/pom.xml
+        echo '    </parent>' >> labdb/pom.xml
+        echo '    <artifactId>labdb-binding</artifactId>' >> labdb/pom.xml
+        echo '    <name>LabDB Binding</name>' >> labdb/pom.xml
+        echo '    <dependencies>' >> labdb/pom.xml
+        echo '        <dependency>' >> labdb/pom.xml
+        echo '            <groupId>site.ycsb</groupId>' >> labdb/pom.xml
+        echo '            <artifactId>core</artifactId>' >> labdb/pom.xml
+        echo '            <version>0.17.0</version>' >> labdb/pom.xml
+        echo '        </dependency>' >> labdb/pom.xml
+        echo '    </dependencies>' >> labdb/pom.xml
+        echo '</project>' >> labdb/pom.xml
+        
+        echo ">>> 5. Registering & Building LabDB <<<"
+        sed -i '/<modules>/a <module>labdb</module>' pom.xml
+        
+        # Збираємо, ігноруючи стиль коду
+        mvn -pl labdb package -DskipTests -Dcheckstyle.skip dependency:copy-dependencies
+        
+        echo ">>> 6. Preparing Classpath <<<"
+        CP="labdb/target/labdb-binding-0.17.0.jar:labdb/target/dependency/*"
+        
+        echo ">>> 7. Running Benchmark <<<"
+        
+        echo "--- LOAD PHASE ---"
+        java -cp "$CP" site.ycsb.Client -load -db site.ycsb.db.LabDBClient \
+          -P workloads/workloada \
+          -p labdb.url=http://localhost:8000 \
+          -p recordcount=500 \
+          -p threadcount=2
+
+        echo "--- RUN PHASE ---"
+        java -cp "$CP" site.ycsb.Client -t -db site.ycsb.db.LabDBClient \
+          -P workloads/workloada \
+          -p labdb.url=http://localhost:8000 \
+          -p operationcount=1000 \
+          -p threadcount=4
           
     # 8. ДЕБАГ (Виправлені імена контейнерів)
     - name: Show Docker Logs (Debug)
