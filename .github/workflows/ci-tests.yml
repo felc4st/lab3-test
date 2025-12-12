@@ -52,8 +52,8 @@ jobs:
       run: |
         docker ps -a
         docker logs coordinator
-        docker logs shard-1
-        docker logs shard-2
+        docker logs s1-leader
+        docker logs s2-leader
 
     # 8. Прибираємо за собою
     - name: Terraform Destroy
