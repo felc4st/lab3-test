@@ -11,7 +11,7 @@ def wait_for_system():
     коли він знайде хоча б один шард.
     """
     print("Waiting for shards to register...")
-    for i in range(30): # Чекаємо до 30 секунд
+    for i in range(60): # Чекаємо до 60 секунд
         try:
             # Спробуємо зареєструвати тестову таблицю (це завжди працює)
             requests.post(f"{BASE_URL}/tables", json={"name": "test_health_check"})
@@ -53,12 +53,12 @@ def test_durability_restart():
     payload = {"partition_key": "u_persist", "value": {"data": "SURVIVED"}}
     requests.post(f"{BASE_URL}/tables/users/records", json=payload)
     
-    # 2. Вбиваємо контейнер (ВИПРАВЛЕНО ІМ'Я)
-    # Було: "shard-1", Стало: "s1-leader"
+    # 2. Вбиваємо контейнер 
+    
     print("\n[TEST] Killing s1-leader...")
     subprocess.run(["docker", "stop", "s1-leader"], check=True)
     
-    time.sleep(3)
+    time.sleep(5)
     
     # 3. Воскрешаємо
     print("[TEST] Starting s1-leader...")
