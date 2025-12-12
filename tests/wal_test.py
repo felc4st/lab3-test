@@ -42,16 +42,28 @@ def wait_for_system():
 def test_basic_crud():
     wait_for_system()
     
-    # Створюємо робочу таблицю
+    # 1. Створюємо таблицю
     requests.post(f"{BASE_URL}/tables", json={"name": "users"})
     
+    # 2. Пишемо (Write is strong consistency on Leader)
     payload = {"partition_key": "u1", "value": {"name": "Oleg"}}
     resp = requests.post(f"{BASE_URL}/tables/users/records", json=payload)
     assert resp.status_code == 200, f"Write failed: {resp.text}"
 
-    resp = requests.get(f"{BASE_URL}/tables/users/records/u1")
-    assert resp.status_code == 200
-    assert resp.json()["value"]["name"] == "Oleg"
+    # 3. Читаємо (Read is eventually consistent)
+    # <--- FIX: Додаємо цикл очікування реплікації
+    print("Waiting for data replication...")
+    start = time.time()
+    while time.time() - start < 10:  # Чекаємо до 10 секунд
+        resp = requests.get(f"{BASE_URL}/tables/users/records/u1")
+        if resp.status_code == 200:
+            assert resp.json()["value"]["name"] == "Oleg"
+            print("Data found on replica!")
+            return
+        time.sleep(0.5)
+    
+    # Якщо за 10 секунд не знайшли - тоді вже фейлимо
+    pytest.fail(f"Read failed after 10s wait. Last status: {resp.status_code}")
 
 def test_durability_restart():
     # 1. Запис
