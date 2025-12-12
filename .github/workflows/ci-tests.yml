@@ -1,0 +1,61 @@
+name: CI - Local Tests with Terraform
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. Завантажуємо код
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # 2. Налаштовуємо Python для тестів
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install Test Dependencies
+      run: pip install pytest requests
+
+    # 3. Налаштовуємо Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_wrapper: false # Важливо для коректного виводу
+
+    # 4. Запускаємо інфраструктуру (Local Docker via Terraform)
+    - name: Terraform Init & Apply
+      working-directory: ./terraform/local
+      run: |
+        terraform init
+        terraform apply -auto-approve
+
+    # 5. Чекаємо трохи, поки контейнери прокинуться і зареєструються
+    - name: Wait for services
+      run: sleep 15
+
+    # 6. Запускаємо тести
+    - name: Run Integration Tests
+      run: pytest tests/integration_test.py -v
+
+    # 7. Показуємо логи (якщо щось впало)
+    - name: Show Docker Logs (Debug)
+      if: always() # Виконувати навіть якщо тести впали
+      run: |
+        docker ps -a
+        docker logs coordinator
+        docker logs shard-1
+        docker logs shard-2
+
+    # 8. Прибираємо за собою
+    - name: Terraform Destroy
+      if: always()
+      working-directory: ./terraform/local
+      run: terraform destroy -auto-approve
