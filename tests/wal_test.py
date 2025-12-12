@@ -78,11 +78,22 @@ def test_durability_restart():
     assert resp.json()["value"]["data"] == "SURVIVED"
 
 def test_quorum_read():
-    # R=2 вимагає, щоб відповіли і лідер, і фоловер (або 2 фоловери)
+    # 1. Виконуємо запит з вимогою опитати 2 ноди (R=2)
     resp = requests.get(f"{BASE_URL}/tables/users/records/u1/quorum?R=2")
     
-    if resp.status_code == 200:
-        assert resp.json()["quorum_met"] is True
-    else:
-        # Якщо реплікація повільна, це може впасти, але це не критично для лаби
-        print(f"Quorum warning: {resp.text}")
+    # 2. Жорстка перевірка статусу. 
+    # Якщо повернеться 500/502/404 - тест ВПАДЕ (це правильно!)
+    assert resp.status_code == 200, f"Quorum read failed: {resp.text}"
+    
+    data = resp.json()
+    
+    # 3. Перевірка логіки кворуму
+    assert data.get("quorum_met") is True, "Coordinator did not satisfy Quorum R=2"
+    
+    # 4. Перевірка цілісності даних
+    # Ми перевіряємо, чи дійсно кворум повернув ті дані, які ми писали в test_basic_crud ("Oleg")
+    assert data["value"]["name"] == "Oleg", f"Got stale or wrong data: {data['value']}"
+    
+    # 5. (Опціонально) Перевірка версії
+    # Оскільки це був перший запис для ключа u1, версія має бути > 0
+    assert data["version"] > 0
