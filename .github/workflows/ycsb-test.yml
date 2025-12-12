@@ -1,0 +1,130 @@
+
+name: YCSB - Local Tests with Terraform
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    # 1. Завантажуємо код
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # 2. Налаштовуємо Python для тестів
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install Test Dependencies
+      run: pip install pytest requests
+
+    # 3. Налаштовуємо Terraform
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_wrapper: false # Важливо для коректного виводу
+
+    # 4. Запускаємо інфраструктуру (Local Docker via Terraform)
+    - name: Terraform Init & Apply
+      working-directory: ./terraform/local
+      run: |
+        terraform init
+        terraform apply -auto-approve
+
+    # 5. Чекаємо трохи, поки контейнери прокинуться і зареєструються
+    - name: Wait for services
+      run: sleep 60
+
+    # 6. Запускаємо тести
+    - name: Run Integration Tests
+      run: pytest tests/wal_test.py -v
+
+    - name: Set up Java 11
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'temurin'
+        java-version: '11'
+
+    - name: Prepare and Run YCSB
+      run: |
+        echo ">>> 1. Cloning YCSB <<<"
+        git clone https://github.com/brianfrankcooper/YCSB.git
+        cd YCSB
+        
+        echo ">>> 2. Creating Module Structure <<<"
+        # Створюємо папку для нашого модуля 'labdb'
+        mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
+        
+        # Копіюємо ваш файл з репозиторію в структуру YCSB
+        # ../ycsb-driver/LabDBClient.java -> посилається на корінь вашого репозиторію
+        cp ../ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        
+        echo ">>> 3. Generating POM.xml <<<"
+        # Створюємо файл налаштувань Maven для нашого модуля
+        cat <<EOF > labdb/pom.xml
+        <?xml version="1.0" encoding="UTF-8"?>
+        <project xmlns="http://maven.apache.org/POM/4.0.0"
+                 xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                 xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+            <parent>
+                <groupId>com.yahoo.ycsb</groupId>
+                <artifactId>root</artifactId>
+                <version>0.18.0-SNAPSHOT</version>
+            </parent>
+            <artifactId>labdb-binding</artifactId>
+            <name>LabDB Binding</name>
+            <dependencies>
+                <dependency>
+                    <groupId>com.yahoo.ycsb</groupId>
+                    <artifactId>core</artifactId>
+                    <version>\${project.version}</version>
+                </dependency>
+            </dependencies>
+        </project>
+        EOF
+        
+        echo ">>> 4. Registering Module in Root POM <<<"
+        # Додаємо наш модуль у головний файл YCSB, щоб він скомпілювався
+        sed -i '/<modules>/a <module>labdb</module>' pom.xml
+        
+        echo ">>> 5. Building <<<"
+        # Компілюємо тільки наш модуль (швидко)
+        mvn -pl labdb -am clean package -DskipTests
+        
+        echo ">>> 6. Running Benchmark <<<"
+        # LOAD PHASE (Завантаження даних)
+        ./bin/ycsb load labdb -P workloads/workloada \
+          -p labdb.url=http://localhost:8000 \
+          -p recordcount=100 \
+          -p threadcount=2 \
+          -s
+          
+        # RUN PHASE (Тестування)
+        ./bin/ycsb run labdb -P workloads/workloada \
+          -p labdb.url=http://localhost:8000 \
+          -p operationcount=1000 \
+          -p threadcount=4 \
+          -s
+
+    # 7. Показуємо логи (якщо щось впало)
+    - name: Show Docker Logs (Debug)
+      if: always() # Виконувати навіть якщо тести впали
+      run: |
+        docker ps -a
+        docker logs coordinator
+        docker logs shard-1
+        docker logs shard-2
+
+    # 8. Прибираємо за собою
+    - name: Terraform Destroy
+      if: always()
+      working-directory: ./terraform/local
+      run: terraform destroy -auto-approve
