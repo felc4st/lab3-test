@@ -51,22 +51,22 @@ jobs:
 
 
 
-    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
+   # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
     - name: Prepare and Run YCSB
       run: |
         echo ">>> 1. Cloning YCSB (Stable Version 0.17.0) <<<"
-        # Клонуємо весь репо, потім перемикаємось на тег, щоб уникнути помилок git
-        git clone https://github.com/brianfrankcooper/YCSB.git
+        git clone --branch 0.17.0 https://github.com/brianfrankcooper/YCSB.git --depth 1
         cd YCSB
-        git checkout 0.17.0
         
-        echo ">>> 2. Creating Module Structure <<<"
+        echo ">>> 2. Installing ROOT POM locally <<<"
+        # Спочатку встановлюємо кореневий проєкт, щоб Maven знав про нього
+        mvn clean install -DskipTests -am
+        
+        echo ">>> 3. Creating Module Structure <<<"
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
-        
-        # Копіюємо драйвер
         cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
-        echo ">>> 3. Generating POM.xml <<<"
+        echo ">>> 4. Generating POM.xml <<<"
         cat <<EOF > labdb/pom.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -90,32 +90,39 @@ jobs:
         </project>
         EOF
         
-        echo ">>> 4. Registering Module in Root POM <<<"
+        echo ">>> 5. Registering & Building Module <<<"
+        # Додаємо модуль
         sed -i '/<modules>/a <module>labdb</module>' pom.xml
+        # Тепер збираємо, і оскільки ми зробили 'mvn install' на кроці 2, 
+        # Maven знайде parent pom у локальному репозиторії (~/.m2)
+        mvn -pl labdb -am package -DskipTests
         
-        echo ">>> 5. Building (FULL PROJECT) <<<"
-        # FIX 1: Будуємо все разом, щоб Maven бачив parent POM
-        mvn clean package -DskipTests -fn
+        echo ">>> 6. Running Benchmark (JAVA DIRECTLY) <<<"
+        # Замість глючного python скрипта, запускаємо Java напряму
+        # Нам треба зібрати CLASSPATH з усіх JAR файлів
         
-        echo ">>> 6. Installing Python 2 (Legacy Fix) <<<"
-        # FIX 2: Встановлюємо Python 2 для старого скрипта YCSB
-        sudo apt-get update
-        sudo apt-get install -y python2
-        
-        echo ">>> 7. Running Benchmark <<<"
-        # Запускаємо через python2 явно
-        python2 ./bin/ycsb load labdb -P workloads/workloada \
+        # 1. Core YCSB jars
+        CP="core/target/*:core/target/dependency/*"
+        # 2. Наш LabDB jar
+        CP="$CP:labdb/target/*:labdb/target/dependency/*"
+        # 3. Slf4j (логінг)
+        CP="$CP:core/target/dependency/slf4j-api-*.jar:core/target/dependency/slf4j-simple-*.jar"
+
+        echo "Classpath: $CP"
+
+        echo ">>> LOAD PHASE <<<"
+        java -cp "$CP" com.yahoo.ycsb.Client -load -db com.yahoo.ycsb.db.LabDBClient \
+          -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p recordcount=500 \
-          -p threadcount=2 \
-          -s
-          
-        python2 ./bin/ycsb run labdb -P workloads/workloada \
+          -p threadcount=2
+
+        echo ">>> RUN PHASE <<<"
+        java -cp "$CP" com.yahoo.ycsb.Client -t -db com.yahoo.ycsb.db.LabDBClient \
+          -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p operationcount=1000 \
-          -p threadcount=4 \
-          -s
-
+          -p threadcount=4
     # 8. ДЕБАГ (Виправлені імена контейнерів)
     - name: Show Docker Logs (Debug)
       if: always()
