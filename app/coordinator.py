@@ -1,30 +1,41 @@
 import os
-import requests
 import logging
 import random
+import asyncio
+import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
 from uhashring import HashRing
 from typing import Optional, Dict, List
 
+# --- CONFIG ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Coordinator")
 
-app = FastAPI(title="Coordinator V3 (Replication & Durability)")
+app = FastAPI(title="Async Coordinator V4 (High Performance)")
 
 # --- STATE ---
-# Map: ShardID -> { "leader": url, "followers": [url, url] }
 SHARD_TOPOLOGY = {}
-# Consistent Hashing (keys -> ShardID)
 ring = HashRing(nodes=[]) 
-
 TABLE_SCHEMAS = {}
+
+# Глобальний асинхронний клієнт
+# limits: дозволяємо необмежену кількість з'єднань для high-load
+# timeout: 5 секунд, щоб не висіти вічно
+http_client = httpx.AsyncClient(
+    timeout=5.0, 
+    limits=httpx.Limits(max_keepalive_connections=None, max_connections=None)
+)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await http_client.aclose()
 
 # --- MODELS ---
 class ShardRegister(BaseModel):
-    shard_id: str   # "shard-1"
-    url: str        # "http://10.0.1.5:8000"
-    role: str       # "leader" or "follower"
+    shard_id: str
+    url: str
+    role: str
 
 class TableDefinition(BaseModel):
     name: str
@@ -36,16 +47,15 @@ class RecordPayload(BaseModel):
 
 # --- HELPERS ---
 def _get_topology(partition_key: str):
-    """Returns (ShardID, LeaderURL, AllReplicaURLs, RealStorageKey)"""
+    """Визначає шард та репліки (CPU-bound, синхронна частина)"""
     shard_id = ring.get_node(partition_key)
     if not shard_id or shard_id not in SHARD_TOPOLOGY:
-        raise HTTPException(503, "No shards available")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "No shards available")
     
     group = SHARD_TOPOLOGY[shard_id]
     leader = group["leader"]
     replicas = [leader] + group["followers"]
-    # Filter out Nones
-    replicas = [r for r in replicas if r]
+    replicas = [r for r in replicas if r] # Filter None
 
     return shard_id, leader, replicas
 
@@ -53,14 +63,14 @@ def _get_storage_key(partition_key: str, sort_key: str = None):
     return f"{partition_key}#{sort_key}" if sort_key else partition_key
 
 # --- API: INFRASTRUCTURE ---
+
 @app.post("/shards/register")
-def register_shard(shard: ShardRegister):
-    # 1. Add ShardID to ring if new
+async def register_shard(shard: ShardRegister):
+    # Хоч тут немає I/O, робимо async для сумісності
     if shard.shard_id not in SHARD_TOPOLOGY:
         SHARD_TOPOLOGY[shard.shard_id] = {"leader": None, "followers": []}
         ring.add_node(shard.shard_id)
     
-    # 2. Update Topology
     if shard.role == "leader":
         SHARD_TOPOLOGY[shard.shard_id]["leader"] = shard.url
     else:
@@ -68,110 +78,121 @@ def register_shard(shard: ShardRegister):
             SHARD_TOPOLOGY[shard.shard_id]["followers"].append(shard.url)
             
     logger.info(f"Registered {shard.role} for {shard.shard_id}: {shard.url}")
-    return {"status": "registered", "topology": SHARD_TOPOLOGY}
+    return {"status": "registered"}
 
 @app.post("/tables")
-def create_table(table: TableDefinition):
+async def create_table(table: TableDefinition):
     TABLE_SCHEMAS[table.name] = table.dict()
     return {"status": "created"}
 
-# --- API: CRUD OPERATIONS ---
+# --- API: CRUD (FULLY ASYNC) ---
 
-# 1. CREATE / UPDATE -> Send to LEADER
+# 1. CREATE / UPDATE
 @app.post("/tables/{table_name}/records")
-def write_record(table_name: str, record: RecordPayload):
-    if table_name not in TABLE_SCHEMAS: raise HTTPException(404, "Table unknown")
+async def write_record(table_name: str, record: RecordPayload):
+    if table_name not in TABLE_SCHEMAS: 
+        raise HTTPException(404, "Table unknown")
     
     shard_id, leader, _ = _get_topology(record.partition_key)
-    if not leader: raise HTTPException(503, f"Shard {shard_id} has no leader")
+    if not leader: 
+        raise HTTPException(503, f"Shard {shard_id} has no leader")
     
     real_key = _get_storage_key(record.partition_key, record.sort_key)
     
     try:
-        # WRITE goes to Leader
-        resp = requests.post(f"{leader}/storage/{real_key}", json={"value": record.value})
+        # AWAIT відправки запиту
+        resp = await http_client.post(f"{leader}/storage/{real_key}", json={"value": record.value})
+        resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        raise HTTPException(502, f"Leader write failed: {e}")
+    except httpx.HTTPError as e:
+        logger.error(f"Leader write failed: {e}")
+        raise HTTPException(502, "Leader write failed")
 
-# 2. DELETE -> Send to LEADER
+# 2. DELETE
 @app.delete("/tables/{table_name}/records/{partition_key}")
-def delete_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
+async def delete_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
     shard_id, leader, _ = _get_topology(partition_key)
-    if not leader: raise HTTPException(503, "No leader")
+    if not leader: 
+        raise HTTPException(503, "No leader")
     
     real_key = _get_storage_key(partition_key, sort_key)
     
     try:
-        # DELETE goes to Leader
-        requests.delete(f"{leader}/storage/{real_key}")
+        await http_client.delete(f"{leader}/storage/{real_key}")
         return {"status": "deleted"}
-    except:
-        raise HTTPException(502, "Leader delete failed")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"Leader delete failed: {e}")
 
-# 3. READ -> Load Balance (Random Replica)
+# 3. READ (Random Replica)
 @app.get("/tables/{table_name}/records/{partition_key}")
-def read_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
+async def read_record(table_name: str, partition_key: str, sort_key: Optional[str] = None):
     _, _, replicas = _get_topology(partition_key)
+    if not replicas: 
+        raise HTTPException(503, "No replicas available")
+
     real_key = _get_storage_key(partition_key, sort_key)
-    
-    # Load Balancing: Pick random replica
     target = random.choice(replicas)
     
     try:
-        # Expecting { "value": ..., "version": ... }
-        resp = requests.get(f"{target}/storage/{real_key}")
+        resp = await http_client.get(f"{target}/storage/{real_key}")
         if resp.status_code == 404:
              raise HTTPException(404, "Not found")
         return resp.json()
-    except:
-        raise HTTPException(502, "Replica read failed")
+    except httpx.HTTPError:
+        # Простий Retry: якщо одна репліка впала, пробуємо ще раз іншу
+        try:
+            target = random.choice(replicas)
+            resp = await http_client.get(f"{target}/storage/{real_key}")
+            if resp.status_code == 404: raise HTTPException(404, "Not found")
+            return resp.json()
+        except:
+            raise HTTPException(502, "Replica read failed")
 
-# 4. EXISTS (HEAD) -> Load Balance
+# 4. EXISTS (HEAD)
 @app.head("/tables/{table_name}/records/{partition_key}")
-def check_exists(table_name: str, partition_key: str, sort_key: Optional[str] = None):
+async def check_exists(table_name: str, partition_key: str, sort_key: Optional[str] = None):
     _, _, replicas = _get_topology(partition_key)
+    if not replicas: return Response(status_code=503)
+
     real_key = _get_storage_key(partition_key, sort_key)
     target = random.choice(replicas)
     
     try:
-        resp = requests.head(f"{target}/storage/{real_key}")
+        resp = await http_client.head(f"{target}/storage/{real_key}")
         return Response(status_code=resp.status_code)
     except:
         return Response(status_code=502)
 
-# 5. QUORUM READ (Task 4)
+# 5. QUORUM READ (PARALLEL ASYNC)
 @app.get("/tables/{table_name}/records/{partition_key}/quorum")
-def read_quorum(table_name: str, partition_key: str, sort_key: Optional[str] = None, R: int = 2):
-    """Читає R реплік і повертає найсвіжішу версію"""
+async def read_quorum(table_name: str, partition_key: str, sort_key: Optional[str] = None, R: int = 2):
     _, _, replicas = _get_topology(partition_key)
     real_key = _get_storage_key(partition_key, sort_key)
     
     if len(replicas) < R:
         raise HTTPException(400, f"Not enough replicas (Has {len(replicas)}, need {R})")
     
-    # Query R random replicas
     targets = random.sample(replicas, R)
-    results = []
     
-    for node in targets:
-        try:
-            r = requests.get(f"{node}/storage/{real_key}", timeout=1)
-            if r.status_code == 200:
-                results.append(r.json()) # {value, version}
-        except:
-            pass
+    # Створюємо список завдань (Tasks)
+    tasks = [http_client.get(f"{node}/storage/{real_key}") for node in targets]
+    
+    # Виконуємо їх ПАРАЛЕЛЬНО
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    valid_results = []
+    for resp in responses:
+        if isinstance(resp, httpx.Response) and resp.status_code == 200:
+            valid_results.append(resp.json())
             
-    if not results:
+    if not valid_results:
         raise HTTPException(404, "Quorum failed: Key not found or nodes down")
     
-    # Conflict Resolution: Last Write Wins (by Version)
-    best_record = max(results, key=lambda x: x["version"])
+    # Conflict Resolution (LWW)
+    best_record = max(valid_results, key=lambda x: x["version"])
     
     return {
         "value": best_record["value"],
         "version": best_record["version"],
         "quorum_met": True
     }
-
-
