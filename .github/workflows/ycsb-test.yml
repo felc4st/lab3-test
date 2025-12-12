@@ -1,6 +1,7 @@
 
 name: YCSB - Local Tests with Terraform
 
+
 on:
   push:
     branches: [ main ]
@@ -8,48 +9,51 @@ on:
     branches: [ main ]
 
 jobs:
-  integration-test:
+  test-and-benchmark:
     runs-on: ubuntu-latest
-    
+
     steps:
-    # 1. Завантажуємо код
-    - name: Checkout code
+    # 1. Отримуємо код
+    - name: Checkout Code
       uses: actions/checkout@v3
 
-    # 2. Налаштовуємо Python для тестів
-    - name: Set up Python
+    # 2. Налаштування середовищ
+    - name: Set up Python 3.9
       uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-    
-    - name: Install Test Dependencies
-      run: pip install pytest requests
 
-    # 3. Налаштовуємо Terraform
-    - name: Setup Terraform
-      uses: hashicorp/setup-terraform@v2
-      with:
-        terraform_wrapper: false # Важливо для коректного виводу
-
-    # 4. Запускаємо інфраструктуру (Local Docker via Terraform)
-    - name: Terraform Init & Apply
-      working-directory: ./terraform/local
-      run: |
-        terraform init
-        terraform apply -auto-approve
-
-    # 5. Чекаємо трохи, поки контейнери прокинуться і зареєструються
-    - name: Wait for services
-      run: sleep 60
-
-    # 6. Запускаємо тести
-
-    - name: Set up Java 11
+    - name: Set up Java 11 (For YCSB)
       uses: actions/setup-java@v3
       with:
         distribution: 'temurin'
         java-version: '11'
 
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_wrapper: false
+
+    # 3. Встановлення залежностей Python
+    - name: Install Python Deps
+      run: pip install pytest requests
+
+    # 4. ЗАПУСК ІНФРАСТРУКТУРИ
+    - name: Terraform Apply
+      working-directory: ./terraform/local
+      run: |
+        terraform init
+        terraform apply -auto-approve
+
+    # 5. Очікування (збільшено до 60с для надійності)
+    - name: Wait for Cluster
+      run: sleep 60
+
+    # 6. ФУНКЦІОНАЛЬНІ ТЕСТИ
+    - name: Run Integration Tests
+      run: pytest tests/wal_test.py -v
+
+    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
     - name: Prepare and Run YCSB
       run: |
         echo ">>> 1. Cloning YCSB <<<"
@@ -57,15 +61,13 @@ jobs:
         cd YCSB
         
         echo ">>> 2. Creating Module Structure <<<"
-        # Створюємо папку для нашого модуля 'labdb'
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
         
-        # Копіюємо ваш файл з репозиторію в структуру YCSB
-        # ../tests/ycsb-driver/LabDBClient.java 
-        cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        # Копіюємо драйвер (припускаємо, що він лежить в ycsb-driver/LabDBClient.java)
+        cp ../ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
-        echo ">>> 3. Generating POM.xml <<<"
-        # Створюємо файл налаштувань Maven 
+        echo ">>> 3. Generating POM.xml (FIXED) <<<"
+        # FIX: Додано <relativePath>../pom.xml</relativePath>
         cat <<EOF > labdb/pom.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -76,6 +78,7 @@ jobs:
                 <groupId>com.yahoo.ycsb</groupId>
                 <artifactId>root</artifactId>
                 <version>0.18.0-SNAPSHOT</version>
+                <relativePath>../pom.xml</relativePath>
             </parent>
             <artifactId>labdb-binding</artifactId>
             <name>LabDB Binding</name>
@@ -90,38 +93,41 @@ jobs:
         EOF
         
         echo ">>> 4. Registering Module in Root POM <<<"
-        # Додаємо наш модуль у головний файл YCSB, щоб він скомпілювався
         sed -i '/<modules>/a <module>labdb</module>' pom.xml
         
         echo ">>> 5. Building <<<"
-        # Компілюємо тільки наш модуль (швидко)
+        # -fn (fail-never) дозволяє продовжити навіть якщо в інших модулях YCSB є ворнінги
         mvn -pl labdb -am clean package -DskipTests
         
         echo ">>> 6. Running Benchmark <<<"
-        # LOAD PHASE (Завантаження даних)
+        # LOAD
         ./bin/ycsb load labdb -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
-          -p recordcount=100 \
+          -p recordcount=500 \
           -p threadcount=2 \
           -s
           
-        # RUN PHASE (Тестування)
+        # RUN
         ./bin/ycsb run labdb -P workloads/workloada \
           -p labdb.url=http://localhost:8000 \
           -p operationcount=1000 \
           -p threadcount=4 \
           -s
 
-    # 7. Показуємо логи (якщо щось впало)
+    # 8. ДЕБАГ (Виправлені імена контейнерів)
     - name: Show Docker Logs (Debug)
-      if: always() # Виконувати навіть якщо тести впали
+      if: always()
       run: |
         docker ps -a
+        echo "=== COORDINATOR LOGS ==="
         docker logs coordinator
-        docker logs shard-1
-        docker logs shard-2
+        echo "=== S1 LEADER LOGS ==="
+        docker logs s1-leader
+        echo "=== S2 LEADER LOGS ==="
+        docker logs s2-leader
+        # Не намагаємось читати старий shard-1
 
-    # 8. Прибираємо за собою
+    # 9. ОЧИЩЕННЯ
     - name: Terraform Destroy
       if: always()
       working-directory: ./terraform/local
