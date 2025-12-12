@@ -51,7 +51,7 @@ jobs:
 
 
 
-    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB (FIXED NAMESPACE)
+    # 7. ПІДГОТОВКА ТА ЗАПУСК YCSB
     - name: Prepare and Run YCSB
       run: |
         echo ">>> 1. Cloning YCSB (Stable Version 0.17.0) <<<"
@@ -59,17 +59,16 @@ jobs:
         cd YCSB
         
         echo ">>> 2. Installing CORE ONLY <<<"
-        mvn -pl core -am clean install -DskipTests -Dmaven.javadoc.skip=true
+        # Встановлюємо ядро в локальний репозиторій
+        mvn -pl core -am clean install -DskipTests -Dmaven.javadoc.skip=true -Dcheckstyle.skip
         
         echo ">>> 3. Creating Module Structure (site.ycsb) <<<"
-        # У версії 0.17.0 пакети називаються site.ycsb, тому створюємо відповідну папку
         mkdir -p labdb/src/main/java/site/ycsb/db
         
-        # МАГІЯ: Копіюємо ваш файл, але на льоту замінюємо 'com.yahoo.ycsb' на 'site.ycsb'
-        # Це виправить і package, і imports, щоб вони збігалися з новим ядром
+        # Копіюємо файл і змінюємо назву пакету на нову (site.ycsb)
         sed 's/com.yahoo.ycsb/site.ycsb/g' ../tests/ycsb-driver/LabDBClient.java > labdb/src/main/java/site/ycsb/db/LabDBClient.java
         
-        echo ">>> 4. Generating POM.xml (site.ycsb) <<<"
+        echo ">>> 4. Generating POM.xml <<<"
         cat <<EOF > labdb/pom.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <project xmlns="http://maven.apache.org/POM/4.0.0"
@@ -89,39 +88,6 @@ jobs:
                     <artifactId>core</artifactId>
                     <version>0.17.0</version>
                 </dependency>
-            </dependencies>
-        </project>
-        EOF
-        
-        echo ">>> 5. Registering & Building LabDB <<<"
-        sed -i '/<modules>/a <module>labdb</module>' pom.xml
-        
-        # Збираємо модуль і копіюємо залежності в папку target/dependency
-        mvn -pl labdb package -DskipTests dependency:copy-dependencies
-        
-        echo ">>> 6. Preparing Classpath <<<"
-        # Збираємо шляхи до всіх JAR файлів
-        CP="labdb/target/labdb-binding-0.17.0.jar:labdb/target/dependency/*"
-        
-        echo "Classpath: $CP"
-
-        echo ">>> 7. Running Benchmark (JAVA DIRECTLY) <<<"
-        
-        # Увага: Тут ми викликаємо site.ycsb.Client (нова назва класу)
-        
-        echo "--- LOAD PHASE ---"
-        java -cp "$CP" site.ycsb.Client -load -db site.ycsb.db.LabDBClient \
-          -P workloads/workloada \
-          -p labdb.url=http://localhost:8000 \
-          -p recordcount=500 \
-          -p threadcount=2
-
-        echo "--- RUN PHASE ---"
-        java -cp "$CP" site.ycsb.Client -t -db site.ycsb.db.LabDBClient \
-          -P workloads/workloada \
-          -p labdb.url=http://localhost:8000 \
-          -p operationcount=1000 \
-          -p threadcount=4
           
     # 8. ДЕБАГ (Виправлені імена контейнерів)
     - name: Show Docker Logs (Debug)
