@@ -61,11 +61,11 @@ jobs:
         mkdir -p labdb/src/main/java/com/yahoo/ycsb/db
         
         # Копіюємо ваш файл з репозиторію в структуру YCSB
-        # ../ycsb-driver/LabDBClient.java -> посилається на корінь вашого репозиторію
-        cp ../ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
+        # ../tests/ycsb-driver/LabDBClient.java 
+        cp ../tests/ycsb-driver/LabDBClient.java labdb/src/main/java/com/yahoo/ycsb/db/
         
         echo ">>> 3. Generating POM.xml <<<"
-        # Створюємо файл налаштувань Maven для нашого модуля
+        # Створюємо файл налаштувань Maven 
         cat <<EOF > labdb/pom.xml
         <?xml version="1.0" encoding="UTF-8"?>
         <project xmlns="http://maven.apache.org/POM/4.0.0"
