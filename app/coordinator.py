@@ -43,7 +43,7 @@ class TableDefinition(BaseModel):
 class RecordPayload(BaseModel):
     partition_key: str
     sort_key: Optional[str] = None
-    value: dict
+    value: Any
 
 # --- HELPERS ---
 def _get_topology(partition_key: str):
@@ -195,4 +195,5 @@ async def read_quorum(table_name: str, partition_key: str, sort_key: Optional[st
         "value": best_record["value"],
         "version": best_record["version"],
         "quorum_met": True
+
     }
