@@ -6,7 +6,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
 from uhashring import HashRing
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 # --- CONFIG ---
 logging.basicConfig(level=logging.INFO)
@@ -197,3 +197,4 @@ async def read_quorum(table_name: str, partition_key: str, sort_key: Optional[st
         "quorum_met": True
 
     }
+
