@@ -45,9 +45,30 @@ jobs:
         terraform init
         terraform apply -auto-approve
 
-    # 5. Очікування (збільшено до 60с для надійності)
-    - name: Wait for Cluster
-      run: sleep 120
+    - name: Wait for Cluster Readiness
+      run: |
+        echo "Waiting for shards to register..."
+        # Цикл: 30 спроб з інтервалом 5 секунд
+        for i in {1..30}; do
+          # Пробуємо записати тестові дані для обох шардів (щоб переконатися, що обидва лідери тут)
+          # "user1" -> Shard A, "user2" -> Shard B (імовірно)
+          
+          # Спочатку реєструємо таблицю (це безпечно робити багато разів)
+          curl -s -X POST http://localhost:8000/tables -H "Content-Type: application/json" -d '{"name": "readiness_check"}' > /dev/null
+          
+          # Пробуємо записати
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/tables/readiness_check/records -H "Content-Type: application/json" -d '{"partition_key": "check", "value": {"status": "ok"}}')
+          
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "System is READY! (Attempt $i)"
+            exit 0
+          fi
+          
+          echo "System not ready yet (Code: $HTTP_CODE). Retrying..."
+          sleep 5
+        done
+        echo "System failed to start in time."
+        exit 1
 
 
 
